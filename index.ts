@@ -1,9 +1,9 @@
 import Q from "q";
 import _ from "underscore";
 import ejs from "ejs";
-import entities from "entities";
 import archiver from "archiver";
 import IDOMParser from "advanced-html-parser";
+import { fstat, writeFileSync } from "fs";
 
 const uuid = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c: string) {
     const r = (Math.random() * 16) | 0;
@@ -31,7 +31,7 @@ class TemplateOptions {
 }
 
 class EpubStructure {
-    content: string[];
+    content: ChapterOptions[];
     // meta-inf/container.xml
     containerXML: string = "<?xml version=\"1.0\" encoding=\"UTF-8\" ?><container version=\"1.0\" xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\"><rootfiles><rootfile full-path=\"OEBPS/content.opf\" media-type=\"application/oebps-package+xml\"/></rootfiles></container>";
     // meta-inf/com.apple.ibooks.display-options.xml
@@ -51,7 +51,7 @@ class EpubStructure {
         tocNCX,
         tocXHTML,
     }: {
-        content: string[];
+        content: ChapterOptions[];
         contentOPF: string;
         tocNCX: string;
         tocXHTML: string;
@@ -63,9 +63,15 @@ class EpubStructure {
     }
 }
 
+export interface ChapterOptions {
+    content: string;
+    title?: string;
+    author?: string[];
+}
+
 export interface EPubOptions {
     title: string;
-    content: string[];
+    content: ChapterOptions[];
     description?: string;
     publisher?: string;
     author?: string[];
@@ -80,6 +86,7 @@ export interface EPubOptions {
     verbose?: boolean;
     proxy?: string;
     template?: TemplateOptions;
+    images?: any[];
 }
 
 export default function epub(options: EPubOptions): Promise<Blob> {
@@ -99,6 +106,7 @@ export default function epub(options: EPubOptions): Promise<Blob> {
         fonts: [],
         version: 3,
         id: uuid(),
+        images: [],
     }, options);
 
     options.docHeader = `<?xml version="1.0" encoding="UTF-8"?>
@@ -118,7 +126,8 @@ function covertContent(options: EPubOptions) {
     const allowedAttributes = ["content", "alt", "id", "title", "src", "href", "about", "accesskey", "aria-activedescendant", "aria-atomic", "aria-autocomplete", "aria-busy", "aria-checked", "aria-controls", "aria-describedat", "aria-describedby", "aria-disabled", "aria-dropeffect", "aria-expanded", "aria-flowto", "aria-grabbed", "aria-haspopup", "aria-hidden", "aria-invalid", "aria-label", "aria-labelledby", "aria-level", "aria-live", "aria-multiline", "aria-multiselectable", "aria-orientation", "aria-owns", "aria-posinset", "aria-pressed", "aria-readonly", "aria-relevant", "aria-required", "aria-selected", "aria-setsize", "aria-sort", "aria-valuemax", "aria-valuemin", "aria-valuenow", "aria-valuetext", "class", "content", "contenteditable", "contextmenu", "datatype", "dir", "draggable", "dropzone", "hidden", "hreflang", "id", "inlist", "itemid", "itemref", "itemscope", "itemtype", "lang", "media", "ns1:type", "ns2:alphabet", "ns2:ph", "onabort", "onblur", "oncanplay", "oncanplaythrough", "onchange", "onclick", "oncontextmenu", "ondblclick", "ondrag", "ondragend", "ondragenter", "ondragleave", "ondragover", "ondragstart", "ondrop", "ondurationchange", "onemptied", "onended", "onerror", "onfocus", "oninput", "oninvalid", "onkeydown", "onkeypress", "onkeyup", "onload", "onloadeddata", "onloadedmetadata", "onloadstart", "onmousedown", "onmousemove", "onmouseout", "onmouseover", "onmouseup", "onmousewheel", "onpause", "onplay", "onplaying", "onprogress", "onratechange", "onreadystatechange", "onreset", "onscroll", "onseeked", "onseeking", "onselect", "onshow", "onstalled", "onsubmit", "onsuspend", "ontimeupdate", "onvolumechange", "onwaiting", "prefix", "property", "rel", "resource", "rev", "role", "spellcheck", "style", "tabindex", "target", "title", "type", "typeof", "vocab", "xml:base", "xml:lang", "xml:space", "colspan", "rowspan", "epub:type", "epub:prefix"];
     const allowedXhtml11Tags = ["div", "p", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li", "dl", "dt", "dd", "address", "hr", "pre", "blockquote", "center", "ins", "del", "a", "span", "bdo", "br", "em", "strong", "dfn", "code", "samp", "kbd", "bar", "cite", "abbr", "acronym", "q", "sub", "sup", "tt", "i", "b", "big", "small", "u", "s", "strike", "basefont", "font", "object", "param", "img", "table", "caption", "colgroup", "col", "thead", "tfoot", "tbody", "tr", "th", "td", "embed", "applet", "iframe", "img", "map", "noscript", "ns:svg", "object", "script", "table", "tt", "var"];
 
-    function sanitizeContent(content: string) {
+    function sanitizeContent(chapterOptions: ChapterOptions) {
+        const content = chapterOptions.content;
         const document = IDOMParser.parse(content);
         const dom = document.documentElement;
 
@@ -163,7 +172,7 @@ function covertContent(options: EPubOptions) {
             }
         });
 
-        return dom.innerHTML;
+        return { ...chapterOptions, content: dom.outerHTML, author: chapterOptions.author ?? options.author };
     }
 
     return content.map((content) => {
@@ -180,17 +189,17 @@ async function render(options: EPubOptions): Promise<Blob> {
 
 async function generateEPUBStructure(options: EPubOptions): Promise<EpubStructure> {
     if (!options.css) { options.css = templatesCSS; }
-    options.content = options.content.map((content) => {
-        return `
+    options.content.forEach((option) => {
+        option.content = `
             ${options.docHeader}
             <head>
                 <meta charset="UTF-8" />
-                    <title>${entities.encodeXML(options.title || '')} </title>
+                    <title>${options.title} </title>
                         < link rel = "stylesheet" type = "text/css" href = "style.css" />
             </head>
             <body>
-                <h1>${entities.encodeXML(options.title || '')}</h1>
-                <p class="epub-author">${entities.encodeXML(options?.author?.join(', ') ?? '')}</p>
+                <h1>${options.title}</h1>
+                <p class="epub-author">${options?.author?.join(', ') ?? ''}</p>
                 ${content}
             </body>
             </html>
@@ -199,18 +208,21 @@ async function generateEPUBStructure(options: EPubOptions): Promise<EpubStructur
 
     const templateOptions = options.template ?? new TemplateOptions({});
 
-    const [opf, ncxToc, htmlToc] = await Q.all<string, string, string>([
-        Q.nfcall(ejs.render, templateOptions.customOpfTemplate, options),
-        Q.nfcall(ejs.renderFile, templateOptions.customNcxTocTemplate, options),
-        Q.nfcall(ejs.renderFile, templateOptions.customHtmlTocTemplate, options)
-    ]);
+    try {
+        const opf = await ejs.render(templateOptions.customOpfTemplate, options, {async: true});
+        const ncxToc = await ejs.render(templateOptions.customNcxTocTemplate, options, {async: true});
+        const htmlToc = await ejs.render(templateOptions.customHtmlTocTemplate, options, {async: true});
 
-    return new EpubStructure({
-        content: options.content,
-        contentOPF: opf,
-        tocNCX: ncxToc,
-        tocXHTML: htmlToc,
-    });
+        return new EpubStructure({
+            content: options.content,
+            contentOPF: opf,
+            tocNCX: ncxToc,
+            tocXHTML: htmlToc,
+        });
+    } catch (error) {
+        console.error(error);
+        throw error;
+    }
 }
 
 async function genEpub(options: EPubOptions, epubStructure: EpubStructure): Promise<Blob> {
@@ -236,14 +248,12 @@ async function genEpub(options: EPubOptions, epubStructure: EpubStructure): Prom
 
     // Add the content files
     epubStructure.content.forEach((content, index) => {
-        archive.append(content, { name: `OEBPS/content_${index}.xhtml` });
+        archive.append(content.content, { name: `OEBPS/content_${index}.xhtml` });
     });
 
     await archive.finalize();
     return genDefer.promise;
 }
-
-module.exports = epub;
 
 const templatesCSS = `
 .epub-author {
@@ -353,8 +363,7 @@ const contentOPF_EJS_TEMPLATE = `<?xml version="1.0" encoding="UTF-8"?>
     </guide>
 </package>`;
 
-const contentNCX_EJS_TEMPLATE = `
-<?xml version="1.0" encoding="UTF-8"?>
+const contentNCX_EJS_TEMPLATE = `<?xml version="1.0" encoding="UTF-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
     <head>
         <meta name="dtb:uid" content="<%= id %>" />
@@ -402,8 +411,7 @@ const contentNCX_EJS_TEMPLATE = `
     </navMap>
 </ncx>`;
 
-const toc_XHTML_EJS_TEMPLATE = `
-<?xml version="1.0" encoding="UTF-8"?>
+const toc_XHTML_EJS_TEMPLATE = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="<%- lang %>" lang="<%- lang %>">
 <head>
@@ -434,3 +442,37 @@ const toc_XHTML_EJS_TEMPLATE = `
 
 </body>
 </html>`;
+
+
+const content = `
+<div id="question-header" class="d-flex sm:fd-column">
+                        <h1 itemprop="name" class="fs-headline1 ow-break-word mb8 flex--item fl1"><a href="/questions/58211880/uncaught-syntaxerror-cannot-use-import-statement-outside-a-module-when-import" class="question-hyperlink">"Uncaught SyntaxError: Cannot use import statement outside a module" when importing ECMAScript 6</a></h1>
+
+                <div class="ml12 aside-cta flex--item sm:ml0 sm:mb12 sm:order-first d-flex jc-end">
+
+                        <div class="ml12 aside-cta flex--item print:d-none">
+                                <a href="/questions/ask" class="ws-nowrap s-btn s-btn__filled">
+        Ask Question
+    </a>
+
+                        </div>
+                </div>
+            </div>
+`;
+
+function main() {
+    console.log('Hello World');
+    epub({
+        title: 'Hello World',
+        content: [{ content }, { content }],
+        verbose: true
+    }).then(async (data) => {
+        const arrayBuffer = await data.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        writeFileSync(`${uuid()}.epub`, buffer);
+    }).catch((error) => {
+        console.error(error);
+    });
+}
+
+main();
